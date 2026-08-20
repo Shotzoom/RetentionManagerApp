@@ -1,0 +1,17 @@
+# Private keys — never commit App Store Connect / In-App Purchase keys.
+# The bundled .p8 (referenced by DefaultConfig.json) must be placed locally
+# by each developer; see README.
+*.p8
+
+# Internal default configuration (team ID, issuer ID, endpoints, products).
+# Obtain from a teammate via a secure channel; see README.
+DefaultConfig.json
+
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
