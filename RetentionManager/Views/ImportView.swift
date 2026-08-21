@@ -67,7 +67,7 @@ struct ImportView: View {
                                 VStack(alignment: .leading, spacing: 6) {
                                     BulletPoint("ProductID: Must match one of the application's product IDs")
                                     BulletPoint("AlternateProductID: Optional. When MessageType is 'alternateProduct', both ProductID and AlternateProductID must be in the same subscription group (you must verify this manually)")
-                                    BulletPoint("CultureCode: Valid locale format (e.g., en, es, fr, de, en-US)")
+                                    BulletPoint("CultureCode: App Store locale code (e.g., en-US, es-ES, fr-FR, de-DE); short codes like en are normalized to full codes")
                                     BulletPoint("Scenario: Must be one of: Default, TrialCancel, MoreThan30, LessThan30")
                                     BulletPoint("MessageType: Must be one of: message, alternateProduct, promotionalOffer")
                                     BulletPoint("PromoCode: Optional. Required for promotionalOffer type")
@@ -209,7 +209,7 @@ struct ImportView: View {
           must be in the same subscription group (you must verify this manually).
         
         • CultureCode: REQUIRED
-          Valid locale format. Examples: en, es, fr, de, en-US, es-MX
+          App Store locale code. Examples: en-US, es-ES, fr-FR, de-DE.\n          Short codes like en are automatically normalized to full codes (en → en-US).
         
         • Scenario: REQUIRED
           Must be one of: Default, TrialCancel, MoreThan30, LessThan30
@@ -237,8 +237,8 @@ struct ImportView: View {
         
         EXAMPLE CSV:
         ProductID,AlternateProductID,CultureCode,Scenario,MessageType,PromoCode,HeaderText,BodyText,ImageID
-        \(AppConfiguration.productIDs.first ?? "com.example.app.subscription"),\(AppConfiguration.productIDs.dropFirst().first ?? ""),en,TrialCancel,alternateProduct,,Don't go,Try a low price monthly plan,
-        \(AppConfiguration.productIDs.first ?? "com.example.app.subscription"),,es,TrialCancel,message,,No vayas,Prueba un plan mensual a bajo costo,
+        \(AppConfiguration.productIDs.first ?? "com.example.app.subscription"),\(AppConfiguration.productIDs.dropFirst().first ?? ""),en-US,TrialCancel,alternateProduct,,Don't go,Try a low price monthly plan,
+        \(AppConfiguration.productIDs.first ?? "com.example.app.subscription"),,es-ES,TrialCancel,message,,No vayas,Prueba un plan mensual a bajo costo,
         """
         
         let pasteboard = NSPasteboard.general
@@ -394,7 +394,7 @@ struct ImportView: View {
         case .authoring:
             productID = fields[0]
             alternateProductID = fields[1]
-            cultureCode = fields[2]
+            cultureCode = SupportedLocale.normalize(fields[2])
             scenario = fields[3]
             messageType = fields[4]
             promoCode = fields[5]
@@ -415,7 +415,7 @@ struct ImportView: View {
             messageID = uuid.uuidString.lowercased()
             productID = fields[1]
             alternateProductID = fields[2]
-            cultureCode = fields[3]
+            cultureCode = SupportedLocale.normalize(fields[3])
             scenario = fields[4]
             messageType = fields[5]
             promoCode = fields[6]

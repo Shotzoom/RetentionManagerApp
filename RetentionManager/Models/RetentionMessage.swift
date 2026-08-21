@@ -80,10 +80,17 @@ class RetentionMessage {
     var headerText: String
     var bodyText: String
     var imageIdentifier: String?
-    var messageState: String = "PENDING" // PENDING, APPROVED, REJECTED (from Apple)
-    var uploadStatus: String = "Local Only" // Local tracking: localOnly, uploading, uploaded, failed
+    var messageState: String = "PENDING" // Sandbox: PENDING, APPROVED, REJECTED (from Apple)
+    var uploadStatus: String = "Local Only" // Sandbox: localOnly, uploading, uploaded, failed
     var uploadError: String? = nil // Error message if upload failed
-    var locale: String = "en" // en, es, fr, de
+    var locale: String = "en-US" // App Store locale code (en-US, es-ES, fr-FR, de-DE)
+
+    // Production tracking. Apple's sandbox and production are independent stores,
+    // so upload status, review state, and default configuration are tracked per
+    // environment. The original properties above carry the sandbox values.
+    var productionUploadStatus: String = UploadStatus.localOnly.rawValue
+    var productionMessageState: String = "PENDING"
+    var productionIsDefault: Bool = false
     
     // Message type and related fields for server response logic
     var messageType: String = MessageType.message.rawValue // message, alternateProduct, promotionalOffer
@@ -104,7 +111,7 @@ class RetentionMessage {
         imageIdentifier: String? = nil,
         messageState: String = "PENDING",
         uploadStatus: String = UploadStatus.localOnly.rawValue,
-        locale: String = "en",
+        locale: String = "en-US",
         messageType: String = MessageType.message.rawValue,
         alternateProductID: String? = nil,
         promoCode: String? = nil,
@@ -127,6 +134,53 @@ class RetentionMessage {
         self.isExternal = isExternal
         self.createdAt = Date()
         self.updatedAt = Date()
+    }
+}
+
+// MARK: - Environment-Aware Accessors
+
+extension RetentionMessage {
+    func uploadStatus(in environment: APIEnvironment) -> String {
+        environment == .production ? productionUploadStatus : uploadStatus
+    }
+
+    func setUploadStatus(_ status: String, in environment: APIEnvironment) {
+        if environment == .production {
+            productionUploadStatus = status
+        } else {
+            uploadStatus = status
+        }
+    }
+
+    func messageState(in environment: APIEnvironment) -> String {
+        environment == .production ? productionMessageState : messageState
+    }
+
+    func setMessageState(_ state: String, in environment: APIEnvironment) {
+        if environment == .production {
+            productionMessageState = state
+        } else {
+            messageState = state
+        }
+    }
+
+    func isDefault(in environment: APIEnvironment) -> Bool {
+        environment == .production ? productionIsDefault : isDefaultMessage
+    }
+
+    func setIsDefault(_ isDefault: Bool, in environment: APIEnvironment) {
+        if environment == .production {
+            productionIsDefault = isDefault
+        } else {
+            isDefaultMessage = isDefault
+        }
+    }
+
+    /// Whether the message exists on Apple in any environment — content is
+    /// immutable once uploaded anywhere (Apple has no update API)
+    var isUploadedAnywhere: Bool {
+        uploadStatus == UploadStatus.uploaded.rawValue ||
+        productionUploadStatus == UploadStatus.uploaded.rawValue
     }
 }
 
@@ -155,15 +209,20 @@ class RetentionImage {
     }
 }
 
-/// Supported locales for retention messages
+/// Supported locales for retention messages.
+/// Raw values are App Store locale codes — the same format Apple uses in the
+/// realtime Get Retention Message request (userLocale) and requires for the
+/// /default/{productId}/{locale} endpoint. Bare language codes like "en" are
+/// rejected by Apple with InvalidLocaleError (4000164), so the full code is
+/// the canonical format for storage and exports.
 enum SupportedLocale: String, CaseIterable, Identifiable {
-    case english = "en"
-    case spanish = "es"
-    case french = "fr"
-    case german = "de"
-    
+    case english = "en-US"
+    case spanish = "es-ES"
+    case french = "fr-FR"
+    case german = "de-DE"
+
     var id: String { rawValue }
-    
+
     var displayName: String {
         switch self {
         case .english: return "English"
@@ -173,22 +232,23 @@ enum SupportedLocale: String, CaseIterable, Identifiable {
         }
     }
 
-    /// The App Store locale short code required by Apple's API (case-sensitive),
-    /// e.g. for the /default/{productId}/{locale} endpoint. Bare language codes
-    /// like "en" are rejected with InvalidLocaleError (4000164).
-    var appStoreLocaleCode: String {
-        switch self {
-        case .english: return "en-US"
-        case .spanish: return "es-ES"
-        case .french: return "fr-FR"
-        case .german: return "de-DE"
-        }
+    /// Language-only prefix ("en"), used for translation mapping and
+    /// normalizing legacy short codes
+    var shortCode: String {
+        String(rawValue.prefix(2))
     }
 
-    /// Maps a locally stored short code ("en") to its App Store locale code ("en-US").
-    /// Falls back to the input unchanged if it's not one of our supported locales
-    /// (e.g. already a full code).
-    static func appStoreLocaleCode(for shortCode: String) -> String {
-        SupportedLocale(rawValue: shortCode)?.appStoreLocaleCode ?? shortCode
+    /// Normalize a stored or imported locale to the App Store locale code
+    /// Apple uses (e.g. legacy "en" → "en-US"). Full codes pass through
+    /// unchanged; unknown values are returned as-is.
+    static func normalize(_ code: String) -> String {
+        let trimmed = code.trimmingCharacters(in: .whitespaces)
+        if let exact = SupportedLocale(rawValue: trimmed) {
+            return exact.rawValue
+        }
+        if let match = SupportedLocale.allCases.first(where: { $0.shortCode == trimmed.lowercased() }) {
+            return match.rawValue
+        }
+        return trimmed
     }
 }

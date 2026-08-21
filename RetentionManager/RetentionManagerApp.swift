@@ -35,6 +35,15 @@ struct RetentionManagerApp: App {
                     if message.uploadStatus.isEmpty {
                         message.uploadStatus = UploadStatus.localOnly.rawValue
                     }
+
+                    // Migrate legacy short locale codes ("en") to the App Store
+                    // locale codes Apple uses ("en-US"), which are the canonical
+                    // format for storage, exports, and the realtime endpoint
+                    let normalizedLocale = SupportedLocale.normalize(message.locale)
+                    if normalizedLocale != message.locale {
+                        print("🔤 Migrating locale for \(message.messageIdentifier): \(message.locale) → \(normalizedLocale)")
+                        message.locale = normalizedLocale
+                    }
                 }
                 try? context.save()
             }

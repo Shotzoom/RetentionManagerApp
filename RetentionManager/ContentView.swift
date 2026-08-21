@@ -22,6 +22,15 @@ struct ContentView: View {
     @State private var syncError: Error?
     @State private var showingConfigurationSetup = false
 
+    // Observed so the UI re-renders when the environment changes in Settings
+    @AppStorage("apiEnvironment") private var apiEnvironmentRaw = APIEnvironment.sandbox.rawValue
+    @State private var isCopyingToProduction = false
+    @State private var copyToProductionResult: String?
+
+    private var environment: APIEnvironment {
+        APIEnvironment(rawValue: apiEnvironmentRaw) ?? .sandbox
+    }
+
     private var filteredMessages: [RetentionMessage] {
         // External placeholders have no known product, so show them under every filter
         allMessages.filter { $0.productID == selectedProductFilter || $0.isExternal }
@@ -47,24 +56,24 @@ struct ContentView: View {
                     NavigationLink {
                         MessageDetailView(message: message)
                     } label: {
-                        MessageRowView(message: message)
+                        MessageRowView(message: message, environment: environment)
                     }
                     .contextMenu {
-                        if message.uploadStatus == UploadStatus.localOnly.rawValue ||
-                           message.uploadStatus == UploadStatus.failed.rawValue {
+                        if message.uploadStatus(in: environment) == UploadStatus.localOnly.rawValue ||
+                           message.uploadStatus(in: environment) == UploadStatus.failed.rawValue {
                             Button {
                                 uploadMessage(message)
                             } label: {
                                 Label(
-                                    message.uploadStatus == UploadStatus.failed.rawValue ? "Retry Upload" : "Upload to API",
+                                    message.uploadStatus(in: environment) == UploadStatus.failed.rawValue ? "Retry Upload" : "Upload to API",
                                     systemImage: "icloud.and.arrow.up"
                                 )
                             }
                         }
-                        
+
                         Divider()
 
-                        if message.uploadStatus == UploadStatus.uploaded.rawValue {
+                        if message.uploadStatus(in: environment) == UploadStatus.uploaded.rawValue {
                             Button(role: .destructive) {
                                 deleteMessageFromApple(message)
                             } label: {
@@ -106,6 +115,20 @@ struct ContentView: View {
                         }
                     }
                     .disabled(isSyncing)
+                }
+                if environment == .production {
+                    ToolbarItem(placement: .automatic) {
+                        Button(action: copyApprovedSandboxMessagesToProduction) {
+                            if isCopyingToProduction {
+                                ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Label("Copy from Sandbox", systemImage: "arrow.right.doc.on.clipboard")
+                            }
+                        }
+                        .disabled(isCopyingToProduction)
+                        .help("Upload this product's sandbox-approved messages to production")
+                    }
                 }
                 ToolbarItem(placement: .automatic) {
                     Button(action: { showingImportOptions = true }) {
@@ -157,6 +180,11 @@ struct ContentView: View {
             } message: { error in
                 Text(error.localizedDescription)
             }
+            .alert("Copy to Production", isPresented: .constant(copyToProductionResult != nil), presenting: copyToProductionResult) { _ in
+                Button("OK") { copyToProductionResult = nil }
+            } message: { result in
+                Text(result)
+            }
         } detail: {
             if let message = selectedMessage {
                 MessageDetailView(message: message)
@@ -195,9 +223,10 @@ struct ContentView: View {
     }
     
     private func uploadMessage(_ message: RetentionMessage) {
-        message.uploadStatus = UploadStatus.uploading.rawValue
+        let env = environment
+        message.setUploadStatus(UploadStatus.uploading.rawValue, in: env)
         message.uploadError = nil
-        
+
         Task {
             do {
                 _ = try await RetentionMessagingAPIService.shared.uploadMessage(
@@ -207,21 +236,92 @@ struct ContentView: View {
                     locale: message.locale,
                     imageIdentifier: message.imageIdentifier
                 )
-                
+
                 await MainActor.run {
-                    message.uploadStatus = UploadStatus.uploaded.rawValue
+                    message.setUploadStatus(UploadStatus.uploaded.rawValue, in: env)
                     message.uploadError = nil
                     message.updatedAt = Date()
                 }
             } catch {
                 await MainActor.run {
-                    message.uploadStatus = UploadStatus.failed.rawValue
+                    message.setUploadStatus(UploadStatus.failed.rawValue, in: env)
                     message.uploadError = error.localizedDescription
                 }
             }
         }
     }
-    
+
+    /// Upload all of the selected product's sandbox-approved messages to production.
+    /// Sandbox and production are independent stores on Apple's side, so messages
+    /// approved in sandbox must be uploaded again for production (where they go
+    /// through Apple's review before becoming APPROVED).
+    private func copyApprovedSandboxMessagesToProduction() {
+        let candidates = allMessages.filter { message in
+            !message.isExternal &&
+            message.productID == selectedProductFilter &&
+            message.uploadStatus(in: .sandbox) == UploadStatus.uploaded.rawValue &&
+            message.messageState(in: .sandbox).uppercased() == "APPROVED" &&
+            message.uploadStatus(in: .production) != UploadStatus.uploaded.rawValue
+        }
+
+        guard !candidates.isEmpty else {
+            copyToProductionResult = "No sandbox-approved messages for \(selectedProductFilter) that aren't already on production."
+            return
+        }
+
+        isCopyingToProduction = true
+
+        Task {
+            var uploaded = 0
+            var failures: [String] = []
+
+            for message in candidates {
+                do {
+                    // Upload the image first if the message has one
+                    if let imageID = message.imageIdentifier {
+                        let imageDescriptor = FetchDescriptor<RetentionImage>()
+                        let images = try modelContext.fetch(imageDescriptor)
+                        if let image = images.first(where: { $0.imageIdentifier == imageID }) {
+                            _ = try await RetentionMessagingAPIService.shared.uploadImage(
+                                imageData: image.imageData,
+                                imageIdentifier: image.imageIdentifier,
+                                altText: image.altText
+                            )
+                        }
+                    }
+
+                    _ = try await RetentionMessagingAPIService.shared.uploadMessage(
+                        messageIdentifier: message.messageIdentifier,
+                        header: message.headerText,
+                        body: message.bodyText,
+                        locale: message.locale,
+                        imageIdentifier: message.imageIdentifier
+                    )
+
+                    await MainActor.run {
+                        message.setUploadStatus(UploadStatus.uploaded.rawValue, in: .production)
+                        message.setMessageState("PENDING", in: .production)
+                        message.updatedAt = Date()
+                    }
+                    uploaded += 1
+                } catch {
+                    failures.append("\(message.headerText): \(error.localizedDescription)")
+                }
+            }
+
+            await MainActor.run {
+                try? modelContext.save()
+                isCopyingToProduction = false
+
+                var summary = "Uploaded \(uploaded) of \(candidates.count) message(s) to production. They are PENDING until Apple approves them."
+                if !failures.isEmpty {
+                    summary += "\n\nFailures:\n" + failures.joined(separator: "\n")
+                }
+                copyToProductionResult = summary
+            }
+        }
+    }
+
     private func syncFromApple() {
         isSyncing = true
         syncError = nil
@@ -244,28 +344,29 @@ struct ContentView: View {
     }
     
     private var environmentSubtitle: String {
-        let env = RetentionMessagingAPIService.shared.environment
-        return env == .sandbox ? "Sandbox Environment" : "Production Environment"
+        environment == .sandbox ? "Sandbox Environment" : "Production Environment"
     }
 }
 
-/// Row view for displaying a retention message in the list
+/// Row view for displaying a retention message in the list.
+/// Status indicators reflect the given environment.
 struct MessageRowView: View {
     let message: RetentionMessage
-    
+    let environment: APIEnvironment
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text(message.headerText)
                     .font(.headline)
-                
-                if message.uploadStatus == UploadStatus.failed.rawValue {
+
+                if message.uploadStatus(in: environment) == UploadStatus.failed.rawValue {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(.red)
                         .font(.caption)
                 }
             }
-            
+
             HStack {
                 if message.isExternal {
                     Label("External", systemImage: "icloud")
@@ -277,17 +378,17 @@ struct MessageRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                
+
                 Spacer()
-                
+
                 // Upload status indicator
-                if message.uploadStatus == UploadStatus.localOnly.rawValue {
+                if message.uploadStatus(in: environment) == UploadStatus.localOnly.rawValue {
                     Image(systemName: "arrow.up.circle")
                         .foregroundStyle(.blue)
                         .font(.caption)
                 }
-                
-                StatusBadge(state: message.messageState)
+
+                StatusBadge(state: message.messageState(in: environment))
             }
         }
         .padding(.vertical, 4)

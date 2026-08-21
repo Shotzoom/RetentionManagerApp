@@ -14,6 +14,13 @@ struct MessageDetailView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
 
+    // Observed so the view re-renders when the environment changes in Settings
+    @AppStorage("apiEnvironment") private var apiEnvironmentRaw = APIEnvironment.sandbox.rawValue
+
+    private var environment: APIEnvironment {
+        APIEnvironment(rawValue: apiEnvironmentRaw) ?? .sandbox
+    }
+
     @State private var isUploading = false
     @State private var showingError = false
     @State private var errorMessage = ""
@@ -39,11 +46,11 @@ struct MessageDetailView: View {
                         .fontWeight(.bold)
                     
                     HStack {
-                        StatusBadge(state: message.messageState)
+                        StatusBadge(state: message.messageState(in: environment))
                         
-                        UploadStatusBadge(status: message.uploadStatus)
+                        UploadStatusBadge(status: message.uploadStatus(in: environment))
                         
-                        if message.isDefaultMessage {
+                        if message.isDefault(in: environment) {
                             HStack(spacing: 4) {
                                 Image(systemName: "star.fill")
                                 Text("Default")
@@ -66,7 +73,7 @@ struct MessageDetailView: View {
                 }
                 
                 // Upload Error Display
-                if message.uploadStatus == UploadStatus.failed.rawValue,
+                if message.uploadStatus(in: environment) == UploadStatus.failed.rawValue,
                    let error = message.uploadError {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -82,8 +89,8 @@ struct MessageDetailView: View {
                 
                 // Upload Actions
                 HStack(spacing: 12) {
-                    if message.uploadStatus == UploadStatus.localOnly.rawValue ||
-                       message.uploadStatus == UploadStatus.failed.rawValue {
+                    if message.uploadStatus(in: environment) == UploadStatus.localOnly.rawValue ||
+                       message.uploadStatus(in: environment) == UploadStatus.failed.rawValue {
                         Button(action: uploadMessage) {
                             HStack {
                                 if isUploading {
@@ -92,14 +99,14 @@ struct MessageDetailView: View {
                                 } else {
                                     Image(systemName: "icloud.and.arrow.up")
                                 }
-                                Text(message.uploadStatus == UploadStatus.failed.rawValue ? "Retry Upload" : "Upload to API")
+                                Text(message.uploadStatus(in: environment) == UploadStatus.failed.rawValue ? "Retry Upload" : "Upload to API")
                             }
                         }
                         .disabled(isUploading)
                         .buttonStyle(.borderedProminent)
                     }
                     
-                    if message.uploadStatus == UploadStatus.uploaded.rawValue {
+                    if message.uploadStatus(in: environment) == UploadStatus.uploaded.rawValue {
                         HStack {
                             Image(systemName: "checkmark.icloud.fill")
                                 .foregroundStyle(.green)
@@ -128,7 +135,7 @@ struct MessageDetailView: View {
                             .buttonStyle(.bordered)
                             .help(isApproved
                                   ? "Configure this as the default message for \(message.productID) in \(message.locale)"
-                                  : "Available once Apple approves this message. Current state: \(message.messageState). Use Sync from Apple to refresh.")
+                                  : "Available once Apple approves this message. Current state: \(message.messageState(in: environment)). Use Sync from Apple to refresh.")
 
                             if !isApproved {
                                 Text("Awaiting Apple approval")
@@ -146,7 +153,7 @@ struct MessageDetailView: View {
                             Text("Edit")
                         }
                     }
-                    .help(isUploaded
+                    .help(message.isUploadedAnywhere
                           ? "Edit the internal cancellation scenario (message content on Apple is immutable)"
                           : "Edit this message")
 
@@ -174,7 +181,7 @@ struct MessageDetailView: View {
                         label: "Product",
                         value: message.productID
                     )
-                    DetailRow(label: "Primary Locale", value: message.locale.uppercased())
+                    DetailRow(label: "Primary Locale", value: message.locale)
                     DetailRow(
                         label: "Message Type",
                         value: MessageType(rawValue: message.messageType)?.displayName ?? message.messageType
@@ -221,7 +228,7 @@ struct MessageDetailView: View {
                 
                 // Message Content
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Message Content (\(message.locale.uppercased()))")
+                    Text("Message Content (\(message.locale))")
                         .font(.headline)
                     
                     Text("Header")
@@ -262,7 +269,7 @@ struct MessageDetailView: View {
             Text(errorMessage)
         }
         .sheet(isPresented: $showingEditSheet) {
-            EditMessageView(message: message, isUploaded: isUploaded)
+            EditMessageView(message: message, isUploaded: message.isUploadedAnywhere)
         }
         .confirmationDialog("Delete Message", isPresented: $showingDeleteConfirmation) {
             if isUploaded {
@@ -289,12 +296,12 @@ struct MessageDetailView: View {
 
     /// Whether this message has been uploaded to Apple
     private var isUploaded: Bool {
-        message.uploadStatus == UploadStatus.uploaded.rawValue
+        message.uploadStatus(in: environment) == UploadStatus.uploaded.rawValue
     }
 
     /// Whether Apple has approved this message for use
     private var isApproved: Bool {
-        message.messageState.uppercased() == "APPROVED"
+        message.messageState(in: environment).uppercased() == "APPROVED"
     }
 
     /// Delete this message, optionally from Apple's servers first
@@ -327,7 +334,8 @@ struct MessageDetailView: View {
 
     private func uploadMessage() {
         isUploading = true
-        message.uploadStatus = UploadStatus.uploading.rawValue
+        let env = environment
+        message.setUploadStatus(UploadStatus.uploading.rawValue, in: env)
         message.uploadError = nil
         
         Task {
@@ -357,7 +365,7 @@ struct MessageDetailView: View {
                 )
                 
                 await MainActor.run {
-                    message.uploadStatus = UploadStatus.uploaded.rawValue
+                    message.setUploadStatus(UploadStatus.uploaded.rawValue, in: env)
                     message.uploadError = nil
                     message.updatedAt = Date()
                     isUploading = false
@@ -365,7 +373,7 @@ struct MessageDetailView: View {
                 }
             } catch {
                 await MainActor.run {
-                    message.uploadStatus = UploadStatus.failed.rawValue
+                    message.setUploadStatus(UploadStatus.failed.rawValue, in: env)
                     message.uploadError = error.localizedDescription
                     isUploading = false
                     errorMessage = error.localizedDescription
@@ -388,23 +396,22 @@ struct MessageDetailView: View {
                 for msg in allMessages {
                     if msg.productID == message.productID && 
                        msg.locale == message.locale && 
-                       msg.isDefaultMessage {
-                        msg.isDefaultMessage = false
+                       msg.isDefault(in: environment) {
+                        msg.setIsDefault(false, in: environment)
                     }
                 }
                 
-                // Mark this message as default
-                message.isDefaultMessage = true
+                // Mark this message as default in the current environment
+                message.setIsDefault(true, in: environment)
                 
                 // Save the changes locally
                 try modelContext.save()
                 
                 // Configure this message as the default on Apple's API.
-                // Apple requires an App Store locale code (e.g. "en-US"), not our
-                // local short code (e.g. "en").
+                // Normalize handles any legacy short-code locales ("en" → "en-US").
                 try await RetentionMessagingAPIService.shared.configureDefaultMessage(
                     productID: message.productID,
-                    locale: SupportedLocale.appStoreLocaleCode(for: message.locale),
+                    locale: SupportedLocale.normalize(message.locale),
                     messageIdentifier: message.messageIdentifier
                 )
                 
@@ -680,7 +687,7 @@ struct DetailRow: View {
         headerText: "Welcome to TOUR Caddie PRO",
         bodyText: "Get access to all premium features including advanced statistics, course maps, and more.",
         messageState: "APPROVED",
-        locale: "en"
+        locale: "en-US"
     )
     
     MessageDetailView(message: message)

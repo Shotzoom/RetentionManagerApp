@@ -332,15 +332,16 @@ struct AddMessageView: View {
             )
             
             await MainActor.run {
+                // Keyed by App Store locale codes to match stored message locales
                 translatedHeaders = [
-                    "es": translations.header.spanish,
-                    "fr": translations.header.french,
-                    "de": translations.header.german
+                    SupportedLocale.spanish.rawValue: translations.header.spanish,
+                    SupportedLocale.french.rawValue: translations.header.french,
+                    SupportedLocale.german.rawValue: translations.header.german
                 ]
                 translatedBodies = [
-                    "es": translations.body.spanish,
-                    "fr": translations.body.french,
-                    "de": translations.body.german
+                    SupportedLocale.spanish.rawValue: translations.body.spanish,
+                    SupportedLocale.french.rawValue: translations.body.french,
+                    SupportedLocale.german.rawValue: translations.body.german
                 ]
             }
         } catch {
@@ -412,7 +413,7 @@ struct AddMessageView: View {
                     let localizedHeader: String
                     let localizedBody: String
                     
-                    if localeCode == "en" {
+                    if localeCode == SupportedLocale.english.rawValue {
                         // English uses the original text
                         localizedHeader = headerText
                         localizedBody = bodyText
@@ -443,7 +444,16 @@ struct AddMessageView: View {
                     
                     modelContext.insert(message)
                 }
-                
+
+                // Persist immediately rather than relying on autosave timing
+                do {
+                    try modelContext.save()
+                } catch {
+                    errorMessage = "Failed to save message: \(error.localizedDescription)"
+                    showingError = true
+                    return
+                }
+
                 dismiss()
             }
         }

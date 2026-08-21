@@ -129,15 +129,16 @@ struct ExportView: View {
     /// Messages included in the SQL export for the backend. In addition to external
     /// placeholders, Apple-default messages are excluded: they exist solely as Apple's
     /// fallback when our API doesn't respond in time, and exporting them would
-    /// conflict with our system's own default handling.
+    /// conflict with our system's own default handling. The default flag follows
+    /// the currently selected environment.
     private var sqlExportMessages: [RetentionMessage] {
-        messages.filter { !$0.isExternal && !$0.isDefaultMessage }
+        messages.filter { !$0.isExternal && !$0.isDefault(in: APIEnvironment.current) }
     }
 
     private func generateCSV(limit: Int? = nil) -> String {
         let messagesToExport = limit != nil ? Array(csvExportMessages.prefix(limit!)) : csvExportMessages
 
-        var csv = "# ITunesRetentionDefinitions\n"
+        var csv = "# ITunesRetentionDefinitions (\(APIEnvironment.current.rawValue) environment)\n"
         csv += "MessageID,ProductID,AlternateProductID,CultureCode,Scenario,MessageType,PromoCode,HeaderText,BodyText,MessageState,ImageID,DateAdded_UTC,DateModified_UTC\n"
 
         for message in messagesToExport {
@@ -153,7 +154,7 @@ struct ExportView: View {
                 escapeCSV(message.promoCode ?? ""),
                 escapeCSV(message.headerText),
                 escapeCSV(message.bodyText),
-                escapeCSV(message.messageState),
+                escapeCSV(message.messageState(in: APIEnvironment.current)),
                 escapeCSV(message.imageIdentifier ?? ""),
                 escapeCSV(ISO8601DateFormatter().string(from: message.createdAt)),
                 escapeCSV(ISO8601DateFormatter().string(from: message.updatedAt))
@@ -173,6 +174,7 @@ struct ExportView: View {
         var sql = """
         -- ITunesRetentionDefinitions Export
         -- Generated: \(Date())
+        -- Environment: \(APIEnvironment.current.rawValue)
         -- SQL Server Schema
 
         -- Replace existing contents (table and schema are managed by the backend)
@@ -206,7 +208,7 @@ struct ExportView: View {
             }
             
             insertStatement += "HeaderText, BodyText, MessageState"
-            valuesList += "'\(escapeSQL(message.headerText))',\n    '\(escapeSQL(message.bodyText))',\n    '\(escapeSQL(message.messageState))'"
+            valuesList += "'\(escapeSQL(message.headerText))',\n    '\(escapeSQL(message.bodyText))',\n    '\(escapeSQL(message.messageState(in: APIEnvironment.current)))'"
             
             // Add ImageID if present
             if let imageID = message.imageIdentifier {
@@ -294,7 +296,7 @@ struct ExportView: View {
         headerText: "Welcome to TOUR Caddie PRO",
         bodyText: "Get access to all premium features.",
         messageState: "APPROVED",
-        locale: "en"
+        locale: "en-US"
     )
     
     ExportView(messages: [message])

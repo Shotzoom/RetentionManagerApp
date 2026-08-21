@@ -13,7 +13,13 @@ enum APIEnvironment: String, CaseIterable, Identifiable {
     case production = "Production"
     
     var id: String { rawValue }
-    
+
+    /// The currently selected environment (persisted in UserDefaults)
+    static var current: APIEnvironment {
+        let stored = UserDefaults.standard.string(forKey: "apiEnvironment") ?? APIEnvironment.sandbox.rawValue
+        return APIEnvironment(rawValue: stored) ?? .sandbox
+    }
+
     var baseURL: String {
         switch self {
         case .sandbox:
@@ -33,13 +39,8 @@ class RetentionMessagingAPIService {
     
     /// Current API environment (sandbox or production)
     var environment: APIEnvironment {
-        get {
-            let stored = UserDefaults.standard.string(forKey: "apiEnvironment") ?? APIEnvironment.sandbox.rawValue
-            return APIEnvironment(rawValue: stored) ?? .sandbox
-        }
-        set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: "apiEnvironment")
-        }
+        get { APIEnvironment.current }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "apiEnvironment") }
     }
     
     private var baseURL: String {

@@ -14,11 +14,15 @@ class SyncService {
     
     private init() {}
     
-    /// Syncs messages and images from Apple's API with the local database
+    /// Syncs messages and images from Apple's API with the local database.
+    /// Only the currently selected environment's tracking fields are touched —
+    /// sandbox and production are independent stores on Apple's side.
     func syncFromApple(modelContext: ModelContext) async throws -> SyncResult {
-        print("🔄 Starting sync from Apple...")
-        
+        let environment = APIEnvironment.current
+        print("🔄 Starting sync from Apple [\(environment.rawValue)]...")
+
         var result = SyncResult()
+        result.environment = environment.rawValue
         
         // Fetch message list from Apple
         let messageItems = try await RetentionMessagingAPIService.shared.getMessageList()
@@ -44,9 +48,9 @@ class SyncService {
         for messageItem in messageItems {
             if let existingMessage = localMessageDict[messageItem.messageIdentifier.lowercased()] {
                 // Update Apple's review state (PENDING/APPROVED/REJECTED) and mark as uploaded
-                let oldState = existingMessage.messageState
-                existingMessage.messageState = messageItem.messageState
-                existingMessage.uploadStatus = UploadStatus.uploaded.rawValue
+                let oldState = existingMessage.messageState(in: environment)
+                existingMessage.setMessageState(messageItem.messageState, in: environment)
+                existingMessage.setUploadStatus(UploadStatus.uploaded.rawValue, in: environment)
                 existingMessage.uploadError = nil
 
                 if oldState != messageItem.messageState {
@@ -62,11 +66,11 @@ class SyncService {
                     productID: "",
                     headerText: "External message",
                     bodyText: "This message exists on Apple but was created outside this app (or on another machine). Apple's API doesn't return message content, so the text can't be displayed. Use Export/Import to transfer full message content between machines.",
-                    messageState: messageItem.messageState,
-                    uploadStatus: UploadStatus.uploaded.rawValue,
                     locale: "",
                     isExternal: true
                 )
+                placeholder.setMessageState(messageItem.messageState, in: environment)
+                placeholder.setUploadStatus(UploadStatus.uploaded.rawValue, in: environment)
                 modelContext.insert(placeholder)
                 result.externalCount += 1
                 print("📌 Imported external message from Apple: \(messageItem.messageIdentifier) (state: \(messageItem.messageState))")
@@ -92,11 +96,11 @@ class SyncService {
         for localMessage in localMessages {
             if !appleMessageIDs.contains(localMessage.messageIdentifier.lowercased()) {
                 // Message exists locally but not in Apple
-                // Update status to indicate it's not on Apple
-                if localMessage.uploadStatus == UploadStatus.uploaded.rawValue {
-                    localMessage.uploadStatus = UploadStatus.localOnly.rawValue
+                // Update status to indicate it's not on Apple in this environment
+                if localMessage.uploadStatus(in: environment) == UploadStatus.uploaded.rawValue {
+                    localMessage.setUploadStatus(UploadStatus.localOnly.rawValue, in: environment)
                     result.removedCount += 1
-                    print("⚠️ Message \(localMessage.messageIdentifier) no longer exists on Apple")
+                    print("⚠️ Message \(localMessage.messageIdentifier) no longer exists on Apple [\(environment.rawValue)]")
                 }
             }
         }
@@ -114,7 +118,7 @@ class SyncService {
 
         for pair in pairs {
             do {
-                let appleLocale = SupportedLocale.appStoreLocaleCode(for: pair.locale)
+                let appleLocale = SupportedLocale.normalize(pair.locale)
                 let defaultID = try await RetentionMessagingAPIService.shared.getDefaultMessage(
                     productID: pair.productID,
                     locale: appleLocale
@@ -122,10 +126,10 @@ class SyncService {
 
                 for message in localMessages where message.productID == pair.productID && message.locale == pair.locale {
                     let isDefault = defaultID != nil && message.messageIdentifier.lowercased() == defaultID
-                    if message.isDefaultMessage != isDefault {
-                        message.isDefaultMessage = isDefault
+                    if message.isDefault(in: environment) != isDefault {
+                        message.setIsDefault(isDefault, in: environment)
                         result.defaultsUpdatedCount += 1
-                        print("⭐️ Default flag for \(message.messageIdentifier) (\(pair.productID)/\(pair.locale)): \(isDefault)")
+                        print("⭐️ Default flag for \(message.messageIdentifier) (\(pair.productID)/\(pair.locale)) [\(environment.rawValue)]: \(isDefault)")
                     }
                 }
             } catch {
@@ -148,6 +152,7 @@ class SyncService {
 
 /// Result of a sync operation
 struct SyncResult {
+    var environment: String = ""
     var totalMessages: Int = 0
     var totalImages: Int = 0
     var updatedCount: Int = 0
@@ -158,7 +163,7 @@ struct SyncResult {
 
     var summary: String {
         """
-        Sync completed successfully:
+        Sync completed successfully (\(environment)):
         • \(totalMessages) messages on Apple
         • \(totalImages) images on Apple
         • \(updatedCount) local messages updated
